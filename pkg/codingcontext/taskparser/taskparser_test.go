@@ -465,6 +465,69 @@ func markdownAwareTestCases() []parseTaskCase {
 	}
 }
 
+// checkTextContains asserts the parsed task round-trips so the given substring
+// is present in the reconstructed content. Used for "best-effort" cases where a
+// malformed slash-command line must be preserved as text rather than aborting parse.
+func checkTextContains(needles ...string) func(t *testing.T, task Task) {
+	return func(t *testing.T, task Task) {
+		t.Helper()
+
+		got := task.String()
+		for _, needle := range needles {
+			if !strings.Contains(got, needle) {
+				t.Errorf("expected reconstructed task to contain %q, got %q", needle, got)
+			}
+		}
+	}
+}
+
+// Malformed slash-command lines outside a code block must not abort the parse.
+// The line is preserved as text. These cases currently fail with
+// "failed to parse task: ... unexpected token ..." because the participle
+// grammar requires Slash @Term ... and treats // (and lone /) as a hard error,
+// discarding the entire task.
+func bestEffortMalformedSlashCases() []parseTaskCase {
+	return []parseTaskCase{
+		{
+			// Also asserts "More text" survives — guards against a fix that parses
+			// line-by-line and salvages only the malformed line, dropping the
+			// surrounding text after it.
+			name:  "best-effort: double slash bare line outside code block",
+			input: "Some text\n// Just a stray double slash\nMore text\n",
+			check: checkTextContains("// Just a stray double slash", "More text"),
+		},
+		{
+			name:  "best-effort: lone slash line outside code block",
+			input: "Intro\n/\nMore text\n",
+			check: checkTextContains("Intro"),
+		},
+		{
+			name:  "best-effort: slash followed by non-term char outside code block",
+			input: "Intro\n/=oops\nMore text\n",
+			check: checkTextContains("Intro"),
+		},
+	}
+}
+
+func TestParseTask_BestEffortMalformedSlash(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range bestEffortMalformedSlashCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			task, err := ParseTask(tt.input)
+			if err != nil {
+				t.Fatalf("ParseTask() error = %v, want nil (malformed slash lines must not abort parse)", err)
+			}
+
+			if tt.check != nil {
+				tt.check(t, task)
+			}
+		})
+	}
+}
+
 func TestParseTask_MarkdownAware(t *testing.T) {
 	t.Parallel()
 
