@@ -3,6 +3,7 @@ package taskparser
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -95,14 +96,14 @@ func collectCodeRanges(doc ast.Node) ([]codeRange, error) {
 // newline characters. This prevents the next text segment from starting with a bare
 // newline immediately before a slash, which would cause the grammar parser to fail
 // (it cannot parse a Text block that has only leading newlines before a slash).
-func splitAndParse(content string, codeRanges []codeRange) (Task, error) {
+func splitAndParse(content string, codeRanges []codeRange, logger *slog.Logger) (Task, error) {
 	var allBlocks []Block
 
 	pos := 0
 
 	for i, cr := range codeRanges {
 		if pos < cr.start {
-			blocks, err := parseGrammar(content[pos:cr.start])
+			blocks, err := parseGrammar(content[pos:cr.start], logger)
 			if err != nil {
 				return nil, err
 			}
@@ -127,7 +128,7 @@ func splitAndParse(content string, codeRanges []codeRange) (Task, error) {
 	}
 
 	if pos < len(content) {
-		blocks, err := parseGrammar(content[pos:])
+		blocks, err := parseGrammar(content[pos:], logger)
 		if err != nil {
 			return nil, err
 		}
@@ -149,17 +150,63 @@ func trailingNewlineEnd(content string, pos int) int {
 
 // parseGrammar runs the participle grammar parser on a plain text segment.
 // It returns nil blocks (not an error) for whitespace-only input.
-func parseGrammar(content string) ([]Block, error) {
+//
+// On parser failure (e.g. a line starting with `/` but lacking a valid term:
+// `//`, lone `/`, `/=foo`), falls back to a best-effort line-by-line parse so
+// one malformed line cannot discard the entire task.
+func parseGrammar(content string, logger *slog.Logger) ([]Block, error) {
 	if strings.TrimSpace(content) == "" {
 		return nil, nil
 	}
 
 	input, err := parser().ParseString("", content)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse task: %w", err)
+	if err == nil {
+		return input.Blocks, nil
 	}
 
-	return input.Blocks, nil
+	return parseGrammarBestEffort(content, logger), nil
+}
+
+// loggerOrDefault returns logger, or slog.Default() if logger is nil. Resolving
+// at use time (rather than capturing at construction) ensures slog.SetDefault
+// changes take effect for callers that pass nil.
+func loggerOrDefault(logger *slog.Logger) *slog.Logger {
+	if logger == nil {
+		return slog.Default()
+	}
+
+	return logger
+}
+
+// parseGrammarBestEffort parses content line-by-line, returning a raw text
+// block for any line the grammar rejects. Called only after the whole-segment
+// parse has already failed.
+func parseGrammarBestEffort(content string, logger *slog.Logger) []Block {
+	var blocks []Block
+
+	for _, line := range strings.SplitAfter(content, "\n") {
+		if line == "" {
+			continue // strings.SplitAfter emits a trailing "" when input ends with "\n"
+		}
+
+		if strings.TrimSpace(line) == "" {
+			blocks = append(blocks, rawTextBlock(line))
+			continue
+		}
+
+		input, err := parser().ParseString("", line)
+		if err != nil {
+			loggerOrDefault(logger).Warn("taskparser: malformed slash command, treating line as text",
+				"line", strings.TrimRight(line, "\r\n"), "error", err)
+			blocks = append(blocks, rawTextBlock(line))
+
+			continue
+		}
+
+		blocks = append(blocks, input.Blocks...)
+	}
+
+	return blocks
 }
 
 // rawTextBlock wraps a raw string as a Text block without any slash command parsing.
@@ -176,6 +223,8 @@ func rawTextBlock(content string) Block {
 
 // Extension is a goldmark extension that parses task structure during the markdown parse.
 // Include it in a goldmark instance and use GetTask to retrieve the parsed Task after parsing.
+// Uses slog.Default() for WARN logs from the best-effort fallback; for a custom logger
+// use NewExtension.
 //
 // Example:
 //
@@ -185,14 +234,23 @@ func rawTextBlock(content string) Block {
 //	task, err := taskparser.GetTask(pctx)
 //
 //nolint:gochecknoglobals // goldmark.WithExtensions expects a package-level extender
-var Extension goldmark.Extender = &taskExtension{}
+var Extension goldmark.Extender = NewExtension(nil)
 
-type taskExtension struct{}
+// NewExtension returns a goldmark extension that parses task structure and routes
+// best-effort fallback WARN logs through the given logger. A nil logger resolves to
+// slog.Default() at parse time (not capture time), so SetDefault changes take effect.
+func NewExtension(logger *slog.Logger) goldmark.Extender {
+	return &taskExtension{logger: logger}
+}
+
+type taskExtension struct {
+	logger *slog.Logger // nil means use slog.Default() at parse time
+}
 
 func (e *taskExtension) Extend(m goldmark.Markdown) {
 	const taskTransformerPriority = 100
 	m.Parser().AddOptions(gparser.WithASTTransformers(
-		util.Prioritized(&taskTransformer{}, taskTransformerPriority),
+		util.Prioritized(&taskTransformer{logger: e.logger}, taskTransformerPriority),
 	))
 }
 
@@ -225,7 +283,9 @@ func GetTask(pc gparser.Context) (Task, error) {
 // taskTransformer implements parser.ASTTransformer. It runs after goldmark has built
 // the document AST and extracts task structure (text vs. slash commands), skipping
 // slash command detection inside code blocks, indented code, and HTML blocks.
-type taskTransformer struct{}
+type taskTransformer struct {
+	logger *slog.Logger
+}
 
 func (t *taskTransformer) Transform(node *ast.Document, reader text.Reader, pc gparser.Context) {
 	source := reader.Source()
@@ -265,17 +325,17 @@ func (t *taskTransformer) Transform(node *ast.Document, reader text.Reader, pc g
 		adjusted = append(adjusted, codeRange{adjStart, adjStop})
 	}
 
-	task, parseErr := splitAndParse(content, adjusted)
+	task, parseErr := splitAndParse(content, adjusted, t.logger)
 	pc.Set(contextKey, &taskParseResult{task: task, err: parseErr})
 }
 
 // parseMarkdownAware parses task content while skipping slash command detection inside
 // code blocks (fenced code, indented code, HTML blocks) by running the Extension
-// during a single goldmark parse pass.
-func parseMarkdownAware(content string) (Task, error) {
+// during a single goldmark parse pass. A nil logger falls back to slog.Default().
+func parseMarkdownAware(content string, logger *slog.Logger) (Task, error) {
 	source := []byte(content)
 	pctx := gparser.NewContext()
-	goldmark.New(goldmark.WithExtensions(Extension)).Parser().
+	goldmark.New(goldmark.WithExtensions(NewExtension(logger))).Parser().
 		Parse(text.NewReader(source), gparser.WithContext(pctx))
 
 	return GetTask(pctx)

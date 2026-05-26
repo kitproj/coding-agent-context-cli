@@ -1,6 +1,8 @@
 package taskparser
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -462,6 +464,117 @@ func markdownAwareTestCases() []parseTaskCase {
 				}
 			},
 		},
+	}
+}
+
+// checkTextContains asserts the parsed task round-trips so the given substring
+// is present in the reconstructed content. Used for "best-effort" cases where a
+// malformed slash-command line must be preserved as text rather than aborting parse.
+func checkTextContains(needles ...string) func(t *testing.T, task Task) {
+	return func(t *testing.T, task Task) {
+		t.Helper()
+
+		got := task.String()
+		for _, needle := range needles {
+			if !strings.Contains(got, needle) {
+				t.Errorf("expected reconstructed task to contain %q, got %q", needle, got)
+			}
+		}
+	}
+}
+
+// Malformed slash-command lines outside a code block must not abort the parse.
+// The line is preserved as text. These cases currently fail with
+// "failed to parse task: ... unexpected token ..." because the participle
+// grammar requires Slash @Term ... and treats // (and lone /) as a hard error,
+// discarding the entire task.
+func bestEffortMalformedSlashCases() []parseTaskCase {
+	return []parseTaskCase{
+		{
+			// Also asserts "More text" survives — guards against a fix that parses
+			// line-by-line and salvages only the malformed line, dropping the
+			// surrounding text after it.
+			name:  "best-effort: double slash bare line outside code block",
+			input: "Some text\n// Just a stray double slash\nMore text\n",
+			check: checkTextContains("// Just a stray double slash", "More text"),
+		},
+		{
+			name:  "best-effort: lone slash line outside code block",
+			input: "Intro\n/\nMore text\n",
+			check: checkTextContains("Intro"),
+		},
+		{
+			name:  "best-effort: slash followed by non-term char outside code block",
+			input: "Intro\n/=oops\nMore text\n",
+			check: checkTextContains("Intro"),
+		},
+	}
+}
+
+func TestParseTask_BestEffortMalformedSlash(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range bestEffortMalformedSlashCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			task, err := ParseTask(tt.input)
+			if err != nil {
+				t.Fatalf("ParseTask() error = %v, want nil (malformed slash lines must not abort parse)", err)
+			}
+
+			if tt.check != nil {
+				tt.check(t, task)
+			}
+		})
+	}
+}
+
+// Verifies ParseTaskWithLogger routes the best-effort fallback WARN through
+// the injected logger rather than slog.Default(), so callers can capture or
+// redirect parser warnings.
+func TestParseTaskWithLogger_RoutesWarnToInjectedLogger(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	input := "Some text\n// stray\nMore text\n"
+
+	if _, err := ParseTaskWithLogger(input, logger); err != nil {
+		t.Fatalf("ParseTaskWithLogger() error = %v, want nil", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "malformed slash command") {
+		t.Errorf("expected WARN about malformed slash command in injected logger output, got %q", out)
+	}
+
+	if !strings.Contains(out, "// stray") {
+		t.Errorf("expected WARN to include the offending line, got %q", out)
+	}
+}
+
+// Verifies a nil logger resolves to slog.Default() at parse time, not capture
+// time — so SetDefault changes made after the package loads still take effect.
+// Guards against a regression where the default is snapshotted at construction.
+func TestParseTaskWithLogger_NilLoggerResolvesLazyDefault(t *testing.T) {
+	// Not t.Parallel: this test mutates slog's package-level default.
+	originalDefault := slog.Default()
+
+	t.Cleanup(func() { slog.SetDefault(originalDefault) })
+
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	input := "Some text\n// stray\nMore text\n"
+
+	if _, err := ParseTaskWithLogger(input, nil); err != nil {
+		t.Fatalf("ParseTaskWithLogger(nil) error = %v, want nil", err)
+	}
+
+	if !strings.Contains(buf.String(), "malformed slash command") {
+		t.Errorf("expected WARN to be routed through the newly-set default logger, got %q", buf.String())
 	}
 }
 

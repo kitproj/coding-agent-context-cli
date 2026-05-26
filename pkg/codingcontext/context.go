@@ -292,7 +292,7 @@ func (cc *Context) makeMarkdownWalkFunc(visitor markdownVisitor) filepath.WalkFu
 		}
 
 		var fm markdown.BaseFrontMatter
-		if _, parseErr := markdown.ParseMarkdownFile(path, &fm); parseErr != nil {
+		if _, parseErr := markdown.ParseMarkdownFileWithLogger(path, &fm, cc.logger); parseErr != nil {
 			if cc.lintCollector != nil {
 				var pe *markdown.ParseError
 				if errors.As(parseErr, &pe) {
@@ -386,7 +386,7 @@ func (cc *Context) findTask(taskName string) error {
 func (cc *Context) loadTask(path, taskName string) error {
 	var frontMatter markdown.TaskFrontMatter
 
-	md, err := markdown.ParseMarkdownFile(path, &frontMatter)
+	md, err := markdown.ParseMarkdownFileWithLogger(path, &frontMatter, cc.logger)
 	if err != nil {
 		return fmt.Errorf("failed to parse task file %s: %w", path, err)
 	}
@@ -428,7 +428,7 @@ func (cc *Context) loadTask(path, taskName string) error {
 
 		var parseErr error
 
-		task, parseErr = taskparser.ParseTask(taskContent)
+		task, parseErr = taskparser.ParseTaskWithLogger(taskContent, cc.logger)
 		if parseErr != nil {
 			return fmt.Errorf("failed to parse task content in file %s: %w", path, parseErr)
 		}
@@ -549,7 +549,7 @@ func (cc *Context) findCommand(commandName string, params taskparser.Params) (st
 
 		var frontMatter markdown.CommandFrontMatter
 
-		md, err := markdown.ParseMarkdownFile(path, &frontMatter)
+		md, err := markdown.ParseMarkdownFileWithLogger(path, &frontMatter, cc.logger)
 		if err != nil {
 			return fmt.Errorf("failed to parse command file %s: %w", path, err)
 		}
@@ -816,7 +816,7 @@ func (cc *Context) findExecuteRuleFiles(ctx context.Context) error {
 	err := cc.visitMarkdownFiles(namespacedRulePaths, func(path string, baseFm *markdown.BaseFrontMatter) error {
 		var frontmatter markdown.RuleFrontMatter
 
-		md, err := markdown.ParseMarkdownFile(path, &frontmatter)
+		md, err := markdown.ParseMarkdownFileWithLogger(path, &frontmatter, cc.logger)
 		if err != nil {
 			return fmt.Errorf("failed to parse markdown file %s: %w", path, err)
 		}
@@ -1042,7 +1042,7 @@ func (cc *Context) loadSkillEntry(skillFile string, lenient bool) error {
 
 	var frontmatter markdown.SkillFrontMatter
 
-	if _, err := markdown.ParseMarkdownFile(skillFile, &frontmatter); err != nil {
+	if _, err := markdown.ParseMarkdownFileWithLogger(skillFile, &frontmatter, cc.logger); err != nil {
 		if lenient {
 			cc.logger.Warn("skipping skill file: failed to parse YAML frontmatter", "path", skillFile, "error", err)
 
