@@ -2,6 +2,7 @@
 package taskparser
 
 import (
+	"log/slog"
 	"strings"
 )
 
@@ -111,13 +112,20 @@ import (
 //	task, _ := ParseTask("Introduction text\n/fix-bug 123\nSome text after")
 //	// len(task) == 3 (text, command, text)
 func ParseTask(text string) (Task, error) {
+	return ParseTaskWithLogger(text, nil)
+}
+
+// ParseTaskWithLogger is like ParseTask but routes best-effort fallback WARN
+// logs through the given logger. A nil logger resolves to slog.Default() at
+// parse time (not capture time), so SetDefault changes take effect.
+func ParseTaskWithLogger(text string, logger *slog.Logger) (Task, error) {
 	// Handle empty or whitespace-only content gracefully
 	// TrimSpace returns empty string for whitespace-only input
 	if strings.TrimSpace(text) == "" {
 		return Task{}, nil
 	}
 
-	return parseMarkdownAware(text)
+	return parseMarkdownAware(text, logger)
 }
 
 // Params converts the slash command's arguments into a parameter map using ParseParams.

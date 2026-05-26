@@ -3,6 +3,7 @@ package markdown
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,7 +69,16 @@ type RuleMarkdown = Markdown[RuleFrontMatter]
 
 // ParseMarkdownFile parses a markdown file into frontmatter and content using goldmark.
 // Errors include file path and, where available, line and column position.
+// Uses slog.Default() for taskparser WARN logs; for a custom logger use
+// ParseMarkdownFileWithLogger.
 func ParseMarkdownFile[T any](path string, frontMatter *T) (Markdown[T], error) {
+	return ParseMarkdownFileWithLogger(path, frontMatter, nil)
+}
+
+// ParseMarkdownFileWithLogger is like ParseMarkdownFile but routes taskparser
+// best-effort fallback WARN logs through the given logger. A nil logger
+// resolves to slog.Default() at parse time (not capture time).
+func ParseMarkdownFileWithLogger[T any](path string, frontMatter *T, logger *slog.Logger) (Markdown[T], error) {
 	cleanPath := filepath.Clean(path)
 
 	source, err := os.ReadFile(cleanPath)
@@ -77,9 +87,9 @@ func ParseMarkdownFile[T any](path string, frontMatter *T) (Markdown[T], error) 
 	}
 
 	// Parse with goldmark+meta+taskparser in a single pass: meta extracts frontmatter,
-	// taskparser.Extension captures task structure (slash commands) from the body.
+	// the taskparser extension captures task structure (slash commands) from the body.
 	pctx := parser.NewContext()
-	doc := goldmark.New(goldmark.WithExtensions(meta.Meta, taskparser.Extension)).Parser().
+	doc := goldmark.New(goldmark.WithExtensions(meta.Meta, taskparser.NewExtension(logger))).Parser().
 		Parse(text.NewReader(source), parser.WithContext(pctx))
 
 	// Get frontmatter map from goldmark-meta (parsed during goldmark parse).

@@ -1,6 +1,8 @@
 package taskparser
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -525,6 +527,54 @@ func TestParseTask_BestEffortMalformedSlash(t *testing.T) {
 				tt.check(t, task)
 			}
 		})
+	}
+}
+
+// Verifies ParseTaskWithLogger routes the best-effort fallback WARN through
+// the injected logger rather than slog.Default(), so callers can capture or
+// redirect parser warnings.
+func TestParseTaskWithLogger_RoutesWarnToInjectedLogger(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	input := "Some text\n// stray\nMore text\n"
+
+	if _, err := ParseTaskWithLogger(input, logger); err != nil {
+		t.Fatalf("ParseTaskWithLogger() error = %v, want nil", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "malformed slash command") {
+		t.Errorf("expected WARN about malformed slash command in injected logger output, got %q", out)
+	}
+
+	if !strings.Contains(out, "// stray") {
+		t.Errorf("expected WARN to include the offending line, got %q", out)
+	}
+}
+
+// Verifies a nil logger resolves to slog.Default() at parse time, not capture
+// time — so SetDefault changes made after the package loads still take effect.
+// Guards against a regression where the default is snapshotted at construction.
+func TestParseTaskWithLogger_NilLoggerResolvesLazyDefault(t *testing.T) {
+	// Not t.Parallel: this test mutates slog's package-level default.
+	originalDefault := slog.Default()
+
+	t.Cleanup(func() { slog.SetDefault(originalDefault) })
+
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	input := "Some text\n// stray\nMore text\n"
+
+	if _, err := ParseTaskWithLogger(input, nil); err != nil {
+		t.Fatalf("ParseTaskWithLogger(nil) error = %v, want nil", err)
+	}
+
+	if !strings.Contains(buf.String(), "malformed slash command") {
+		t.Errorf("expected WARN to be routed through the newly-set default logger, got %q", buf.String())
 	}
 }
 
