@@ -3,6 +3,7 @@ package taskparser
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -149,18 +150,54 @@ func trailingNewlineEnd(content string, pos int) int {
 
 // parseGrammar runs the participle grammar parser on a plain text segment.
 // It returns nil blocks (not an error) for whitespace-only input.
+//
+// On parser failure (e.g. a line starting with `/` but lacking a valid term:
+// `//`, lone `/`, `/=foo`), falls back to a best-effort line-by-line parse so
+// one malformed line cannot discard the entire task.
 func parseGrammar(content string) ([]Block, error) {
 	if strings.TrimSpace(content) == "" {
 		return nil, nil
 	}
 
 	input, err := parser().ParseString("", content)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse task: %w", err)
+	if err == nil {
+		return input.Blocks, nil
 	}
 
-	return input.Blocks, nil
+	return parseGrammarBestEffort(content), nil
 }
+
+// parseGrammarBestEffort parses content line-by-line, returning a raw text
+// block for any line the grammar rejects. Called only after the whole-segment
+// parse has already failed.
+func parseGrammarBestEffort(content string) []Block {
+	var blocks []Block
+
+	for _, line := range strings.SplitAfter(content, "\n") {
+		if line == "" {
+			continue // strings.SplitAfter emits a trailing "" when input ends with "\n"
+		}
+
+		if strings.TrimSpace(line) == "" {
+			blocks = append(blocks, rawTextBlock(line))
+			continue
+		}
+
+		input, err := parser().ParseString("", line)
+		if err != nil {
+			slog.Warn("taskparser: malformed slash command, treating line as text",
+				"line", strings.TrimRight(line, "\r\n"), "error", err)
+			blocks = append(blocks, rawTextBlock(line))
+
+			continue
+		}
+
+		blocks = append(blocks, input.Blocks...)
+	}
+
+	return blocks
+}
+
 
 // rawTextBlock wraps a raw string as a Text block without any slash command parsing.
 // Content() and String() on the returned block both return the original string exactly.
